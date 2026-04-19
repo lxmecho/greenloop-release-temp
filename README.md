@@ -68,6 +68,14 @@ http://127.0.0.1:8000/index.php
 - [config.example.php](/d:/桌面/课程/节能减排大赛/config.example.php)
 - [deploy/config.production.example.php](/d:/桌面/课程/节能减排大赛/deploy/config.production.example.php)
 
+## 更新代码时的数据保留说明
+
+- 用户新增的数据默认保存在 `data/*.json`
+- 用户上传的图片默认保存在 `uploads/`
+- 这两类文件已在 [`.gitignore`](/d:/桌面/课程/节能减排大赛/.gitignore) 中排除，不会随 `git push` / `git pull` 被覆盖
+- 因此正常更新网站代码时，只要不要手动删除 `data/` 和 `uploads/`，你新增的真实数据会保留
+- 如果当前环境使用 JSON 存储，更新前仍建议先备份一次 `data/` 目录
+
 ## 展示内容补充
 
 如果要继续把首页补成更完整的汇报展示版本，建议优先准备这些信息：

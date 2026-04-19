@@ -394,27 +394,6 @@ input[type="submit"]:hover {
     line-height: 1.78;
 }
 
-.demo-seed-panel {
-    margin-bottom: 24px;
-}
-
-.demo-seed-panel .panel-header {
-    align-items: flex-start;
-}
-
-.demo-seed-panel form {
-    flex-shrink: 0;
-}
-
-.demo-account-grid {
-    margin-top: 18px;
-}
-
-.demo-account-grid .feature-card {
-    box-shadow: none;
-    background: rgba(31, 122, 74, 0.045);
-}
-
 .platform-function-list {
     display: grid;
     gap: 14px;
