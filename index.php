@@ -375,7 +375,7 @@ function initialize_demo_flow_data(): array
         'door_pickup_building' => '国光7号楼',
         'door_pickup_floor' => '5',
         'door_pickup_room' => '507',
-        'door_pickup_slot' => '工作日 19:30-21:00',
+        'door_pickup_slot' => '周三19:00-22:00',
         'status' => 'pickup_scheduled',
         'admin_note' => '已审核通过，等待按预约时段上门回收。',
         'points_awarded' => false,
@@ -1512,6 +1512,13 @@ elseif ($page === 'login' || $page === ADMIN_LOGIN_PAGE):
     <?php
 elseif ($page === 'submit'):
     $user = require_login();
+    $pickupCampusOptions = campus_options();
+    $defaultPickupCampus = in_array((string) ($user['campus'] ?? ''), $pickupCampusOptions, true)
+        ? (string) $user['campus']
+        : '';
+    $defaultPickupZones = $defaultPickupCampus !== ''
+        ? (pickup_zone_catalog()[$defaultPickupCampus] ?? [])
+        : [];
     $doorPickupBuildings = door_pickup_buildings_for((string) ($user['campus'] ?? ''));
     $doorPickupSlots = door_pickup_time_slot_options();
     ?>
@@ -1592,16 +1599,19 @@ elseif ($page === 'submit'):
                 <div class="field">
                     <label for="pickup_campus">校区</label>
                     <select id="pickup_campus" name="pickup_campus" data-pickup-campus>
-                        <option value="" disabled selected hidden>请选择校区</option>
-                        <?php foreach (campus_options() as $campus): ?>
-                            <option value="<?= e($campus) ?>"><?= e($campus) ?></option>
+                        <option value="" <?= $defaultPickupCampus === '' ? 'selected' : '' ?> disabled hidden>请选择校区</option>
+                        <?php foreach ($pickupCampusOptions as $campus): ?>
+                            <option value="<?= e($campus) ?>" <?= $campus === $defaultPickupCampus ? 'selected' : '' ?>><?= e($campus) ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
                 <div class="field">
                     <label for="pickup_zone">园区</label>
                     <select id="pickup_zone" name="pickup_zone" data-pickup-zone data-selected="">
-                        <option value="">请选择园区</option>
+                        <option value="" selected disabled hidden>请选择园区</option>
+                        <?php foreach ($defaultPickupZones as $zone): ?>
+                            <option value="<?= e($zone) ?>"><?= e($zone) ?></option>
+                        <?php endforeach; ?>
                     </select>
                 </div>
                 <div class="field" data-pickup-subpoint-wrap style="display:none;">
@@ -1632,14 +1642,14 @@ elseif ($page === 'submit'):
                     <label for="door_pickup_floor">楼层</label>
                     <select id="door_pickup_floor" name="door_pickup_floor">
                         <option value="" disabled selected hidden>请选择楼层</option>
-                        <?php for ($floor = 1; $floor <= 20; $floor++): ?>
+                        <?php for ($floor = 1; $floor <= 13; $floor++): ?>
                             <option value="<?= e((string) $floor) ?>"><?= e((string) $floor) ?> 层</option>
                         <?php endfor; ?>
                     </select>
                 </div>
                 <div class="field">
                     <label for="door_pickup_room">房间号</label>
-                    <input id="door_pickup_room" name="door_pickup_room" placeholder="例如：507 / A302">
+                    <input id="door_pickup_room" name="door_pickup_room" placeholder="例如1105/1209">
                 </div>
                 <div class="field">
                     <label for="door_pickup_slot">可预约时间段</label>
@@ -2081,10 +2091,6 @@ elseif ($page === 'points'):
                 <div class="feature-card">
                     <h3>积分扣减规则</h3>
                     <p>提交兑换申请时先暂扣积分，若管理员驳回则自动退回。</p>
-                </div>
-                <div class="feature-card">
-                    <h3>适合后续扩展</h3>
-                    <p>后续可叠加“环保达人榜”“学院排行”“志愿服务时长联动”等机制。</p>
                 </div>
             </div>
         </article>

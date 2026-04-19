@@ -212,6 +212,7 @@ document.querySelectorAll('[data-pickup-campus]').forEach(function (campusSelect
             : '';
 
         setOptions(zoneSelect, zones, '请选择园区', selectedZone);
+        zoneSelect.disabled = zones.length === 0;
         zoneSelect.dataset.selected = '';
         syncSubpoints();
     }
@@ -226,6 +227,7 @@ document.querySelectorAll('[data-pickup-campus]').forEach(function (campusSelect
             : '';
 
         setOptions(subpointSelect, subpoints, '请选择具体点位', selectedSubpoint);
+        subpointSelect.disabled = subpoints.length === 0;
         subpointSelect.dataset.selected = '';
         subpointWrap.style.display = subpoints.length > 0 ? 'grid' : 'none';
     }

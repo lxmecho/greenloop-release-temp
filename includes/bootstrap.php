@@ -489,11 +489,10 @@ function door_pickup_buildings_for(string $campus): array
 function door_pickup_time_slot_options(): array
 {
     return [
-        '工作日 18:00-19:30',
-        '工作日 19:30-21:00',
-        '周三 14:30-17:30',
-        '周六 10:00-12:00',
-        '周六 15:00-18:00',
+        '周一19:00-22:00',
+        '周三19:00-22:00',
+        '周六9:00-11:00',
+        '周天14:00-18:00',
     ];
 }
 
