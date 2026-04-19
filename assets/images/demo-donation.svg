@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Donation Demo</title>
+  <desc id="desc">Illustration for a reusable donated electronic device.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#eff8f0"/>
+      <stop offset="100%" stop-color="#d8efe0"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1f7a4a"/>
+      <stop offset="100%" stop-color="#2f965f"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="760" fill="url(#bg)"/>
+  <circle cx="190" cy="160" r="86" fill="#d97a28" opacity="0.18"/>
+  <circle cx="1020" cy="620" r="120" fill="#1f7a4a" opacity="0.14"/>
+  <rect x="280" y="140" width="640" height="420" rx="36" fill="white" stroke="#d6e5da" stroke-width="8"/>
+  <rect x="348" y="206" width="504" height="288" rx="28" fill="url(#card)"/>
+  <rect x="428" y="534" width="344" height="24" rx="12" fill="#dbe8dd"/>
+  <path d="M603 316c35-58 123-30 123 35 0 76-123 144-123 144S480 427 480 351c0-65 88-93 123-35z" fill="#fff"/>
+  <text x="600" y="110" text-anchor="middle" font-size="44" font-family="Segoe UI, Microsoft YaHei, sans-serif" fill="#125033" font-weight="700">Reusable Device</text>
+</svg>

@@ -1,0 +1,8 @@
+/uploads/*
+!/uploads/.gitkeep
+/data/*.json
+!/data/.gitkeep
+/config.php
+.vscode/
+greenloop-code-release.zip
+greenloop-deploy.zip
