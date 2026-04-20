@@ -1618,7 +1618,6 @@ elseif ($page === 'dashboard'):
 elseif ($page === 'points'):
     $user = $currentUser;
     $activeRewards = array_values(array_filter($rewards, static fn(array $reward): bool => !empty($reward['active'])));
-    $rewardPointTiers = reward_points_tiers();
     ?>
     <section class="content-grid">
         <article class="panel">
@@ -1671,38 +1670,9 @@ elseif ($page === 'points'):
             </div>
             <div class="cards-grid" style="grid-template-columns:1fr;">
                 <div class="feature-card">
-                    <h3>参考价分段换积分</h3>
-                    <p>管理员会在最终完成环节录入参考价，系统再按分段自动换算积分，并在完成核验后一次性发放。</p>
-                </div>
-                <div class="feature-card">
                     <h3>积分扣减规则</h3>
                     <p>提交积分商品兑换申请时会先暂扣积分，若管理员驳回则自动退回。</p>
                 </div>
-            </div>
-            <div class="table-wrap" style="margin-top:16px;">
-                <table>
-                    <thead>
-                    <tr>
-                        <th>参考价区间</th>
-                        <th>对应积分</th>
-                    </tr>
-                    </thead>
-                    <tbody>
-                    <?php foreach ($rewardPointTiers as $tier): ?>
-                        <tr>
-                            <td data-label="参考价区间">
-                                <?= e(rtrim(rtrim(number_format((float) $tier['min'], 2), '0'), '.')) ?> 元
-                                <?php if ($tier['max'] !== null): ?>
-                                    - <?= e(rtrim(rtrim(number_format((float) $tier['max'], 2), '0'), '.')) ?> 元
-                                <?php else: ?>
-                                    及以上
-                                <?php endif; ?>
-                            </td>
-                            <td data-label="对应积分"><?= e((string) $tier['points']) ?> 积分</td>
-                        </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
             </div>
         </article>
     </section>
