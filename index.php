@@ -60,7 +60,7 @@ function item_badge_class(string $status): string
 {
     return match ($status) {
         'rejected' => 'badge-danger',
-        'pending_review', 'dropoff_ready', 'pickup_scheduled' => 'badge-warn',
+        'pending_review', 'dropoff_ready', 'dropoff_delivered', 'pickup_scheduled', 'picked_up' => 'badge-warn',
         'completed' => 'badge-neutral',
         default => '',
     };
@@ -120,6 +120,46 @@ function find_application(int $id): ?array
 function find_reward(int $id): ?array
 {
     return find_record(load_dataset('rewards'), $id);
+}
+
+function refund_application_reserved_points(array &$application, ?array $item, string $reason = ''): void
+{
+    $reservedPoints = (int) ($application['reserved_points'] ?? 0);
+    if ($reservedPoints <= 0 || !empty($application['points_refunded'])) {
+        return;
+    }
+
+    $title = $item !== null ? (string) ($item['title'] ?? '该物品') : '该物品';
+    $content = '你申请《' . $title . '》暂扣的 ' . $reservedPoints . ' 积分已退回。';
+    if ($reason !== '') {
+        $content .= '原因：' . $reason;
+    }
+
+    adjust_user_points(
+        (int) ($application['applicant_id'] ?? 0),
+        $reservedPoints,
+        '物品兑换积分已退回',
+        $content,
+        app_url(['page' => 'dashboard', 'section' => 'applications'])
+    );
+
+    $application['points_refunded'] = true;
+    $application['updated_at'] = now();
+}
+
+function sync_door_pickup_confirmation_status(array &$item): bool
+{
+    if (($item['disposal_type'] ?? '') !== 'door_pickup') {
+        return false;
+    }
+
+    if (!empty($item['user_pickup_confirmed']) && !empty($item['admin_pickup_confirmed']) && ($item['status'] ?? '') !== 'picked_up') {
+        $item['status'] = 'picked_up';
+        $item['updated_at'] = now();
+        return true;
+    }
+
+    return false;
 }
 
 function process_post(?array $currentUser): void
@@ -381,10 +421,22 @@ function process_post(?array $currentUser): void
                 'door_pickup_floor' => $disposalType === 'door_pickup' ? $doorPickupFloor : '',
                 'door_pickup_room' => $disposalType === 'door_pickup' ? $doorPickupRoom : '',
                 'door_pickup_slot' => $disposalType === 'door_pickup' ? $doorPickupSlot : '',
+                'item_code' => '',
                 'status' => 'pending_review',
                 'admin_note' => '',
+                'approved_at' => '',
+                'completed_at' => '',
+                'reference_price' => 0,
+                'exchange_points' => 0,
+                'reward_points' => 0,
                 'points_awarded' => false,
                 'matched_application_id' => 0,
+                'user_dropoff_confirmed' => false,
+                'user_dropoff_confirmed_at' => '',
+                'user_pickup_confirmed' => false,
+                'user_pickup_confirmed_at' => '',
+                'admin_pickup_confirmed' => false,
+                'admin_pickup_confirmed_at' => '',
                 'created_at' => now(),
                 'updated_at' => now(),
             ];
@@ -397,6 +449,7 @@ function process_post(?array $currentUser): void
             $itemId = (int) post_value('item_id', 0);
             $purpose = trim((string) post_value('purpose'));
             $item = find_item($itemId);
+            $exchangePoints = $item !== null ? item_exchange_points($item) : 0;
 
             if ($item === null || ($item['status'] ?? '') !== 'published') {
                 flash('error', '该物品当前不可申请。');
@@ -410,6 +463,10 @@ function process_post(?array $currentUser): void
                 flash('error', '请填写申请原因或用途说明。');
                 redirect(app_url(['page' => 'item', 'id' => $itemId]));
             }
+            if ($exchangePoints > 0 && (int) ($user['points'] ?? 0) < $exchangePoints) {
+                flash('error', '当前积分不足，暂时无法申请该可再利用物品。');
+                redirect(app_url(['page' => 'item', 'id' => $itemId]));
+            }
 
             $applications = load_dataset('applications');
             foreach ($applications as $application) {
@@ -419,6 +476,16 @@ function process_post(?array $currentUser): void
                 }
             }
 
+            if ($exchangePoints > 0) {
+                adjust_user_points(
+                    (int) $user['id'],
+                    -$exchangePoints,
+                    '可再利用物品申请已提交',
+                    '你已申请《' . $item['title'] . '》，系统暂扣 ' . $exchangePoints . ' 积分，若申请未通过会自动退回。',
+                    app_url(['page' => 'dashboard', 'section' => 'applications'])
+                );
+            }
+
             $applications[] = [
                 'id' => next_id($applications),
                 'item_id' => $itemId,
@@ -426,12 +493,14 @@ function process_post(?array $currentUser): void
                 'purpose' => $purpose,
                 'status' => 'pending',
                 'admin_reply' => '',
+                'reserved_points' => $exchangePoints,
+                'points_refunded' => false,
                 'created_at' => now(),
                 'updated_at' => now(),
             ];
             save_dataset('applications', $applications);
             add_message((int) $item['user_id'], '有新的物品申请', '你发布的《' . $item['title'] . '》收到了新的申请，管理员审核后会继续通知你。', app_url(['page' => 'dashboard']));
-            flash('success', '申请已提交，请耐心等待管理员审核。');
+            flash('success', $exchangePoints > 0 ? '申请已提交，所需积分已暂扣，请等待管理员审核。' : '申请已提交，请耐心等待管理员审核。');
             redirect(app_url(['page' => 'dashboard']));
 
         case 'redeem_reward':
@@ -483,6 +552,65 @@ function process_post(?array $currentUser): void
             mark_message_as_read((int) post_value('message_id', 0), (int) $user['id']);
             redirect(app_url(['page' => 'dashboard', 'section' => 'messages']));
 
+        case 'user_confirm_dropoff':
+            $user = require_login();
+            $itemId = (int) post_value('item_id', 0);
+            $items = load_dataset('items');
+
+            foreach ($items as &$item) {
+                if ((int) ($item['id'] ?? 0) !== $itemId || (int) ($item['user_id'] ?? 0) !== (int) $user['id']) {
+                    continue;
+                }
+
+                if (($item['disposal_type'] ?? '') !== 'recycle' || ($item['status'] ?? '') !== 'dropoff_ready') {
+                    flash('error', '该记录当前无法确认已投递。');
+                    redirect(app_url(['page' => 'dashboard']));
+                }
+
+                $item['user_dropoff_confirmed'] = true;
+                $item['user_dropoff_confirmed_at'] = now();
+                $item['status'] = 'dropoff_delivered';
+                $item['updated_at'] = now();
+                save_dataset('items', $items);
+                flash('success', '已确认物品投递，回收人员后续会根据编号统一回收。');
+                redirect(app_url(['page' => 'dashboard']));
+            }
+            unset($item);
+
+            flash('error', '未找到可操作的投递记录。');
+            redirect(app_url(['page' => 'dashboard']));
+
+        case 'user_confirm_pickup':
+            $user = require_login();
+            $itemId = (int) post_value('item_id', 0);
+            $items = load_dataset('items');
+
+            foreach ($items as &$item) {
+                if ((int) ($item['id'] ?? 0) !== $itemId || (int) ($item['user_id'] ?? 0) !== (int) $user['id']) {
+                    continue;
+                }
+
+                if (($item['disposal_type'] ?? '') !== 'door_pickup' || !in_array((string) ($item['status'] ?? ''), ['pickup_scheduled', 'picked_up'], true)) {
+                    flash('error', '该记录当前无法确认已取走。');
+                    redirect(app_url(['page' => 'dashboard']));
+                }
+
+                $item['user_pickup_confirmed'] = true;
+                $item['user_pickup_confirmed_at'] = now();
+                $statusChanged = sync_door_pickup_confirmation_status($item);
+                if (!$statusChanged) {
+                    $item['updated_at'] = now();
+                }
+
+                save_dataset('items', $items);
+                flash('success', $statusChanged ? '已完成双方取走确认，等待管理员入仓核验。' : '已记录你的取走确认，等待回收人员同步确认。');
+                redirect(app_url(['page' => 'dashboard']));
+            }
+            unset($item);
+
+            flash('error', '未找到可操作的上门回收记录。');
+            redirect(app_url(['page' => 'dashboard']));
+
         case 'admin_update_announcement':
             require_admin_user();
             $title = trim((string) post_value('title'));
@@ -520,6 +648,7 @@ function process_post(?array $currentUser): void
             $itemId = (int) post_value('item_id', 0);
             $decision = (string) post_value('decision');
             $note = trim((string) post_value('admin_note'));
+            $exchangePoints = (int) post_value('exchange_points', 0);
             $items = load_dataset('items');
 
             foreach ($items as &$item) {
@@ -532,20 +661,47 @@ function process_post(?array $currentUser): void
 
                 if ($decision === 'approve') {
                     $disposalType = (string) ($item['disposal_type'] ?? '');
+                    if ($disposalType === 'donation') {
+                        $item['exchange_points'] = max(1, $exchangePoints > 0 ? $exchangePoints : calculate_item_exchange_points($item));
+                    } else {
+                        $item['exchange_points'] = 0;
+                    }
+
+                    $item['reward_points'] = 0;
+                    $item['reference_price'] = (float) ($item['reference_price'] ?? 0);
+                    $item['approved_at'] = now();
+                    $item['item_code'] = ((string) ($item['item_code'] ?? '')) !== '' ? (string) $item['item_code'] : generate_item_code($item);
+                    $item['user_dropoff_confirmed'] = false;
+                    $item['user_dropoff_confirmed_at'] = '';
+                    $item['user_pickup_confirmed'] = false;
+                    $item['user_pickup_confirmed_at'] = '';
+                    $item['admin_pickup_confirmed'] = false;
+                    $item['admin_pickup_confirmed_at'] = '';
+
                     $item['status'] = match ($disposalType) {
                         'recycle' => 'dropoff_ready',
                         'door_pickup' => 'pickup_scheduled',
                         default => 'published',
                     };
-                    if ($disposalType !== 'door_pickup' && empty($item['points_awarded'])) {
-                        $item['points_awarded'] = true;
-                        adjust_user_points((int) $item['user_id'], 5, '物品审核通过，积分到账', '你提交的《' . $item['title'] . '》已通过审核，系统已发放 5 积分。', app_url(['page' => 'dashboard']));
-                    }
-                    if ($disposalType === 'door_pickup') {
-                        add_message((int) $item['user_id'], '上门回收已预约', '你提交的《' . $item['title'] . '》已通过审核，管理员会按预约时段上门回收。回收完成后系统会再发放 5 积分。' . ($note !== '' ? '管理员备注：' . $note : ''), app_url(['page' => 'dashboard']));
+
+                    $message = '你提交的《' . $item['title'] . '》已通过审核，系统编号为 ' . $item['item_code'] . '。';
+                    if ($disposalType === 'donation') {
+                        $message .= '该物品已进入公示大厅，兑换所需积分为 ' . $item['exchange_points'] . ' 分；完成交接后，系统会根据最终核验参考价自动计算并发放积分。';
+                    } elseif ($disposalType === 'recycle') {
+                        $message .= '请在投递前将该编号写在便签纸上贴在物品上，投递到固定回收点后记得在系统中确认“已投递”。入仓核验无误后，系统会根据最终参考回收价自动发放积分。';
                     } else {
-                        add_message((int) $item['user_id'], '物品审核通过', '你提交的《' . $item['title'] . '》已通过审核。' . ($note !== '' ? '管理员备注：' . $note : ''), app_url(['page' => 'dashboard']));
+                        $message .= '请在回收人员上门前将该编号标记在物品上；物品被取走后，回收人员和你都需要在系统中确认“已取走”。入仓核验无误后，系统会根据最终参考回收价自动发放积分。';
                     }
+                    if ($note !== '') {
+                        $message .= '管理员备注：' . $note;
+                    }
+
+                    add_message(
+                        (int) $item['user_id'],
+                        $disposalType === 'door_pickup' ? '物品审核通过，等待上门回收' : '物品审核通过',
+                        $message,
+                        app_url(['page' => 'item', 'id' => (int) $item['id']])
+                    );
                 } else {
                     $item['status'] = 'rejected';
                     add_message((int) $item['user_id'], '物品审核未通过', '你提交的《' . $item['title'] . '》未通过审核。' . ($note !== '' ? '原因：' . $note : '请补充更准确的物品信息后重新提交。'), app_url(['page' => 'submit']));
@@ -558,10 +714,55 @@ function process_post(?array $currentUser): void
             flash('success', '物品审核结果已保存。');
             redirect(app_url(['page' => 'admin', 'tab' => 'items']));
 
+        case 'admin_confirm_pickup':
+            require_admin_user();
+            $itemId = (int) post_value('item_id', 0);
+            $note = trim((string) post_value('admin_note'));
+            $items = load_dataset('items');
+
+            foreach ($items as &$item) {
+                if ((int) ($item['id'] ?? 0) !== $itemId) {
+                    continue;
+                }
+
+                if (($item['disposal_type'] ?? '') !== 'door_pickup' || !in_array((string) ($item['status'] ?? ''), ['pickup_scheduled', 'picked_up'], true)) {
+                    flash('error', '该记录当前无法标记为已取走。');
+                    redirect(app_url(['page' => 'admin', 'tab' => 'door_pickups']));
+                }
+
+                $item['admin_pickup_confirmed'] = true;
+                $item['admin_pickup_confirmed_at'] = now();
+                if ($note !== '') {
+                    $item['admin_note'] = $note;
+                }
+
+                $statusChanged = sync_door_pickup_confirmation_status($item);
+                if (!$statusChanged) {
+                    $item['updated_at'] = now();
+                }
+
+                save_dataset('items', $items);
+                add_message(
+                    (int) $item['user_id'],
+                    $statusChanged ? '物品已完成双方取走确认' : '回收人员已确认取走',
+                    $statusChanged
+                        ? '《' . $item['title'] . '》已完成双方取走确认，管理员接下来会在集中分类仓库完成核验。'
+                        : '回收人员已确认取走《' . $item['title'] . '》，请你也在系统中确认“已取走”，方便后续入仓核验。',
+                    app_url(['page' => 'dashboard'])
+                );
+                flash('success', $statusChanged ? '已完成双方取走确认，等待入仓核验。' : '已记录回收人员取走确认。');
+                redirect(app_url(['page' => 'admin', 'tab' => 'door_pickups']));
+            }
+            unset($item);
+
+            flash('error', '未找到可操作的上门回收记录。');
+            redirect(app_url(['page' => 'admin', 'tab' => 'door_pickups']));
+
         case 'admin_complete_item':
             require_admin_user();
             $itemId = (int) post_value('item_id', 0);
             $note = trim((string) post_value('admin_note'));
+            $referencePrice = round((float) post_value('reference_price', 0), 2);
             $items = load_dataset('items');
             $applications = load_dataset('applications');
             $redirectTab = 'items';
@@ -571,25 +772,52 @@ function process_post(?array $currentUser): void
                     continue;
                 }
 
+                if (!in_array((string) ($item['status'] ?? ''), ['dropoff_delivered', 'picked_up', 'matched'], true)) {
+                    flash('error', '该记录当前还不能直接完结，请先完成前置确认。');
+                    redirect(app_url(['page' => 'admin', 'tab' => ($item['disposal_type'] ?? '') === 'door_pickup' ? 'door_pickups' : 'items']));
+                }
+                if ($referencePrice <= 0) {
+                    flash('error', '请先填写最终核验参考价，系统会据此自动换算积分。');
+                    redirect(app_url(['page' => 'admin', 'tab' => ($item['disposal_type'] ?? '') === 'door_pickup' ? 'door_pickups' : 'items']));
+                }
+
                 $item['status'] = 'completed';
                 $item['admin_note'] = $note;
+                $item['reference_price'] = $referencePrice;
+                $item['completed_at'] = now();
                 $item['updated_at'] = now();
-                if (($item['disposal_type'] ?? '') === 'door_pickup' && empty($item['points_awarded'])) {
+
+                $rewardPoints = reward_points_from_reference_price($referencePrice);
+                $item['reward_points'] = $rewardPoints;
+                if (empty($item['points_awarded'])) {
                     $item['points_awarded'] = true;
-                    adjust_user_points((int) $item['user_id'], 5, '上门回收完成，积分到账', '你提交的《' . $item['title'] . '》已完成上门回收，系统已发放 5 积分。', app_url(['page' => 'dashboard']));
+                    adjust_user_points(
+                        (int) $item['user_id'],
+                        $rewardPoints,
+                        '物品流程完成，积分到账',
+                        '你提交的《' . $item['title'] . '》已完成最终核验，参考价为 ' . number_format($referencePrice, 2) . ' 元，系统已按规则发放 ' . $rewardPoints . ' 积分。',
+                        app_url(['page' => 'dashboard'])
+                    );
+                } else {
+                    add_message((int) $item['user_id'], '物品流程已完成', '《' . $item['title'] . '》已完成最终处理。' . ($note !== '' ? '管理员备注：' . $note : ''), app_url(['page' => 'dashboard']));
                 }
+
                 if (($item['disposal_type'] ?? '') === 'door_pickup') {
                     $redirectTab = 'door_pickups';
                 }
-                add_message((int) $item['user_id'], '物品流程已完成', '《' . $item['title'] . '》已完成后续处理。' . ($note !== '' ? '管理员备注：' . $note : ''), app_url(['page' => 'dashboard']));
 
                 $matchedId = (int) ($item['matched_application_id'] ?? 0);
                 if ($matchedId > 0) {
                     foreach ($applications as $application) {
-                        if ((int) ($application['id'] ?? 0) === $matchedId) {
-                            add_message((int) $application['applicant_id'], '申请物品已完成交接', '《' . $item['title'] . '》的交接状态已被管理员标记为完成。', app_url(['page' => 'dashboard']));
-                            break;
+                        if ((int) ($application['id'] ?? 0) !== $matchedId) {
+                            continue;
                         }
+
+                        $extra = item_exchange_points($item) > 0
+                            ? '本次领取共消耗 ' . item_exchange_points($item) . ' 积分。'
+                            : '';
+                        add_message((int) $application['applicant_id'], '申请物品已完成交接', '《' . $item['title'] . '》已完成交接。' . $extra . ($note !== '' ? '管理员备注：' . $note : ''), app_url(['page' => 'dashboard']));
+                        break;
                     }
                 }
                 break;
@@ -608,47 +836,80 @@ function process_post(?array $currentUser): void
             $applications = load_dataset('applications');
             $items = load_dataset('items');
 
-            $targetApplication = null;
-            foreach ($applications as &$application) {
+            $targetIndex = null;
+            foreach ($applications as $index => &$application) {
                 if ((int) ($application['id'] ?? 0) !== $applicationId) {
                     continue;
                 }
                 $application['status'] = $decision === 'approve' ? 'approved' : 'rejected';
                 $application['admin_reply'] = $reply;
                 $application['updated_at'] = now();
-                $targetApplication = $application;
+                $targetIndex = $index;
                 break;
             }
             unset($application);
 
-            if ($targetApplication === null) {
+            if ($targetIndex === null) {
                 flash('error', '申请记录不存在。');
                 redirect(app_url(['page' => 'admin', 'tab' => 'applications']));
             }
+
+            $targetApplication = $applications[$targetIndex];
 
             foreach ($items as &$item) {
                 if ((int) ($item['id'] ?? 0) !== (int) ($targetApplication['item_id'] ?? 0)) {
                     continue;
                 }
 
+                $requiredPoints = item_exchange_points($item);
                 if ($decision === 'approve') {
+                    if ($requiredPoints > 0 && (int) ($applications[$targetIndex]['reserved_points'] ?? 0) <= 0) {
+                        $applicant = find_record(load_dataset('users'), (int) ($targetApplication['applicant_id'] ?? 0));
+                        if ($applicant === null || (int) ($applicant['points'] ?? 0) < $requiredPoints) {
+                            flash('error', '该申请人当前积分不足，无法通过审核。');
+                            redirect(app_url(['page' => 'admin', 'tab' => 'applications']));
+                        }
+
+                        adjust_user_points(
+                            (int) $targetApplication['applicant_id'],
+                            -$requiredPoints,
+                            '可再利用物品审核通过',
+                            '《' . $item['title'] . '》审核通过，系统已扣除 ' . $requiredPoints . ' 积分。',
+                            app_url(['page' => 'dashboard', 'section' => 'applications'])
+                        );
+                        $applications[$targetIndex]['reserved_points'] = $requiredPoints;
+                        $applications[$targetIndex]['points_refunded'] = false;
+                    }
+
                     $item['status'] = 'matched';
                     $item['matched_application_id'] = $applicationId;
                     $item['updated_at'] = now();
 
-                    add_message((int) $targetApplication['applicant_id'], '物品申请已通过', '你申请的《' . $item['title'] . '》已通过审核。' . ($reply !== '' ? '领取说明：' . $reply : '请等待管理员进一步通知领取安排。'), app_url(['page' => 'dashboard']));
+                    add_message(
+                        (int) $targetApplication['applicant_id'],
+                        '物品申请已通过',
+                        '你申请的《' . $item['title'] . '》已通过审核。'
+                        . ($requiredPoints > 0 ? '该物品兑换所需的 ' . $requiredPoints . ' 积分已为你锁定。' : '')
+                        . ($reply !== '' ? '领取说明：' . $reply : '请等待管理员进一步通知领取安排。'),
+                        app_url(['page' => 'dashboard'])
+                    );
                     add_message((int) $item['user_id'], '你的物品已匹配成功', '《' . $item['title'] . '》已有申请通过审核。' . ($reply !== '' ? '管理员说明：' . $reply : ''), app_url(['page' => 'dashboard']));
 
-                    foreach ($applications as &$otherApplication) {
-                        if ((int) ($otherApplication['item_id'] ?? 0) === (int) ($item['id'] ?? 0) && (int) ($otherApplication['id'] ?? 0) !== $applicationId && ($otherApplication['status'] ?? '') === 'pending') {
-                            $otherApplication['status'] = 'rejected';
-                            $otherApplication['admin_reply'] = '该物品已匹配给其他同学，感谢你的关注。';
-                            $otherApplication['updated_at'] = now();
-                            add_message((int) $otherApplication['applicant_id'], '物品申请未通过', '你申请的《' . $item['title'] . '》已分配给其他同学，本次申请未通过。', app_url(['page' => 'listings']));
+                    foreach ($applications as $otherIndex => &$otherApplication) {
+                        if ((int) ($otherApplication['item_id'] ?? 0) !== (int) ($item['id'] ?? 0) || (int) ($otherApplication['id'] ?? 0) === $applicationId || ($otherApplication['status'] ?? '') !== 'pending') {
+                            continue;
                         }
+
+                        $otherApplication['status'] = 'rejected';
+                        $otherApplication['admin_reply'] = '该物品已匹配给其他同学，感谢你的关注。';
+                        $otherApplication['updated_at'] = now();
+                        refund_application_reserved_points($otherApplication, $item, '该物品已分配给其他申请人。');
+                        add_message((int) $otherApplication['applicant_id'], '物品申请未通过', '你申请的《' . $item['title'] . '》已分配给其他同学，本次申请未通过。', app_url(['page' => 'listings']));
+                        $applications[$otherIndex] = $otherApplication;
                     }
                     unset($otherApplication);
                 } else {
+                    refund_application_reserved_points($applications[$targetIndex], $item, $reply !== '' ? $reply : '管理员未通过该申请。');
                     add_message((int) $targetApplication['applicant_id'], '物品申请未通过', '你申请的《' . $item['title'] . '》未通过审核。' . ($reply !== '' ? '原因：' . $reply : ''), app_url(['page' => 'dashboard']));
                 }
                 break;
@@ -881,7 +1142,7 @@ if ($page === 'home'):
                     </div>
                     <div class="platform-function-item">
                         <strong>积分兑换</strong>
-                        <span>每条审核通过记录奖励 5 积分，可在平台兑换环保类小物品。</span>
+                        <span>积分会按最终核验参考价分段发放，可兑换环保小礼品或公示大厅中的可再利用设备。</span>
                     </div>
                 </div>
             </article>
@@ -914,7 +1175,7 @@ if ($page === 'home'):
                     </details>
                     <details>
                         <summary>隐私与积分</summary>
-                        <p>公示页面不展示手机号等个人信息；捐赠和固定回收点在审核通过后奖励 5 积分，上门回收在回收完成后再奖励 5 积分。</p>
+                        <p>公示页面不展示手机号等个人信息；积分会在物品完成交接或入仓核验后发放，并可用于兑换礼品或申请公示大厅中的可再利用设备。</p>
                     </details>
                 </div>
             </article>
@@ -1136,10 +1397,10 @@ elseif ($page === 'submit'):
     ?>
     <section class="panel">
         <div class="panel-header">
-            <div>
-                <h2 class="section-title">提交待处理电子产品</h2>
-                <p class="section-lead">请尽量填写准确、完整的信息。系统会先由管理员审核，通过后再进入公示或回收流程；其中上门回收会在回收完成后再发放 5 积分。</p>
-            </div>
+                <div>
+                    <h2 class="section-title">提交待处理电子产品</h2>
+                    <p class="section-lead">请尽量填写准确、完整的信息。管理员审核通过后会生成物品编号，再进入公示或回收流程；积分会在最终交接或入仓核验后发放。</p>
+                </div>
         </div>
         <form method="post" enctype="multipart/form-data">
             <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
@@ -1329,6 +1590,7 @@ elseif ($page === 'listings'):
                             </div>
                             <div class="listing-card-tags">
                                 <span class="badge badge-soft">捐赠</span>
+                                <span class="pill"><?= e((string) item_exchange_points($item)) ?> 积分兑换</span>
                                 <?php if (($item['target_group'] ?? '') !== ''): ?>
                                     <span class="chip chip-accent">适用：<?= e($item['target_group']) ?></span>
                                 <?php endif; ?>
@@ -1362,6 +1624,10 @@ elseif ($page === 'item'):
         if ($pickupDisplay === '' && (($item['pickup_campus'] ?? '') !== '' || ($item['pickup_zone'] ?? '') !== '')) {
             $pickupDisplay = pickup_location_display((string) ($item['pickup_campus'] ?? ''), (string) ($item['pickup_zone'] ?? ''), (string) ($item['pickup_subpoint'] ?? ''));
         }
+        $exchangePoints = item_exchange_points($item);
+        $rewardPoints = item_reward_points($item);
+        $rewardPointsLabel = item_reward_points_label($item);
+        $canViewItemCode = $currentUser !== null && (is_admin($currentUser) || (int) ($item['user_id'] ?? 0) === (int) ($currentUser['id'] ?? 0));
         ?>
         <section class="content-grid">
             <article class="panel">
@@ -1371,24 +1637,46 @@ elseif ($page === 'item'):
                         <h2 class="section-title"><?= e($item['title']) ?></h2>
                         <p class="section-lead"><?= e($item['category']) ?> · <?= e(condition_label((string) $item['condition'])) ?></p>
                     </div>
-                    <span class="badge <?= e(item_badge_class((string) $item['status'])) ?>"><?= e(status_label((string) $item['status'])) ?></span>
+                    <span class="badge <?= e(item_badge_class((string) $item['status'])) ?>"><?= e(item_status_label((string) $item['status'])) ?></span>
                 </div>
                 <div class="key-value">
                     <div><span>处理方式</span><strong><?= e(disposal_label((string) $item['disposal_type'])) ?></strong></div>
                     <div><span>品牌 / 型号</span><strong><?= e($item['brand'] ?: '未填写') ?></strong></div>
                     <div><span>发布校区</span><strong><?= e($owner['campus'] ?? '未知') ?></strong></div>
+                    <div><span>完成后奖励积分</span><strong><?= e($rewardPointsLabel) ?></strong></div>
+                    <?php if ((float) ($item['reference_price'] ?? 0) > 0): ?>
+                        <div><span>最终核验参考价</span><strong><?= e(number_format((float) $item['reference_price'], 2)) ?> 元</strong></div>
+                    <?php endif; ?>
+                    <?php if (($item['disposal_type'] ?? '') === 'donation'): ?>
+                        <div><span>兑换所需积分</span><strong><?= e((string) $exchangePoints) ?></strong></div>
+                    <?php endif; ?>
+                    <?php if ($canViewItemCode && ((string) ($item['item_code'] ?? '')) !== ''): ?>
+                        <div><span>物品编号</span><strong><?= e((string) $item['item_code']) ?></strong></div>
+                    <?php endif; ?>
                     <?php if (($item['disposal_type'] ?? '') === 'recycle'): ?>
                         <div><span>回收点</span><strong><?= e($pickupDisplay !== '' ? $pickupDisplay : '未设置') ?></strong></div>
                         <div><span>预计投递时间</span><strong><?= e($item['pickup_time'] ?: '未填写') ?></strong></div>
+                        <?php if (!empty($item['user_dropoff_confirmed'])): ?>
+                            <div><span>投递确认</span><strong>已确认投递</strong></div>
+                        <?php endif; ?>
                     <?php endif; ?>
                     <?php if (($item['disposal_type'] ?? '') === 'door_pickup'): ?>
                         <div><span>上门地址</span><strong><?= e($doorPickupAddress !== '' ? $doorPickupAddress : '未设置') ?></strong></div>
                         <div><span>预约时段</span><strong><?= e($item['door_pickup_slot'] ?: '未填写') ?></strong></div>
+                        <div><span>用户确认取走</span><strong><?= !empty($item['user_pickup_confirmed']) ? '已确认' : '待确认' ?></strong></div>
+                        <div><span>回收人员确认取走</span><strong><?= !empty($item['admin_pickup_confirmed']) ? '已确认' : '待确认' ?></strong></div>
                     <?php endif; ?>
                     <?php if (($item['target_group'] ?? '') !== ''): ?>
                         <div><span>适用人群</span><strong><?= e($item['target_group']) ?></strong></div>
                     <?php endif; ?>
                 </div>
+                <?php if ($canViewItemCode && ((string) ($item['item_code'] ?? '')) !== '' && in_array((string) ($item['status'] ?? ''), ['dropoff_ready', 'dropoff_delivered', 'pickup_scheduled', 'picked_up'], true)): ?>
+                    <div class="divider"></div>
+                    <div class="feature-card">
+                        <h3>编号标记提醒</h3>
+                        <p>请在物品上贴好编号 <?= e((string) $item['item_code']) ?>，可用便签纸手写后贴在物品表面，便于回收人员现场识别。</p>
+                    </div>
+                <?php endif; ?>
                 <div class="divider"></div>
                 <h3>物品说明</h3>
                 <p><?= nl2br(e($item['description'])) ?></p>
@@ -1426,13 +1714,23 @@ elseif ($page === 'item'):
                         <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
                         <input type="hidden" name="action" value="apply_item">
                         <input type="hidden" name="item_id" value="<?= e((string) $item['id']) ?>">
+                        <div class="feature-card" style="margin-bottom:16px;">
+                            <h3><?= e((string) $exchangePoints) ?> 积分兑换</h3>
+                            <p>提交申请后系统会先暂扣所需积分，若管理员未通过申请会自动退回。</p>
+                            <?php if ($currentUser !== null): ?>
+                                <p>你当前可用积分：<?= e((string) ($currentUser['points'] ?? 0)) ?></p>
+                            <?php endif; ?>
+                        </div>
                         <div class="field">
                             <label for="purpose">申请原因 / 用途说明</label>
                             <textarea id="purpose" name="purpose" placeholder="例如：课程设计需要该设备、个人学习使用、家庭经济困难希望获得帮助。" required></textarea>
                         </div>
                         <div class="inline-actions" style="margin-top:16px;">
-                            <input type="submit" value="提交申领申请">
+                            <input type="submit" value="提交申领申请" <?= ((int) ($currentUser['points'] ?? 0) < $exchangePoints) ? 'disabled' : '' ?>>
                         </div>
+                        <?php if ((int) ($currentUser['points'] ?? 0) < $exchangePoints): ?>
+                            <p class="muted" style="margin-top:12px;">当前积分不足，暂时无法提交该物品的兑换申请。</p>
+                        <?php endif; ?>
                     </form>
                 <?php elseif ($currentUser === null): ?>
                     <div class="empty-state">
@@ -1471,7 +1769,7 @@ elseif ($page === 'dashboard'):
                 <div class="stat-card">
                     <strong><?= e((string) $user['points']) ?></strong>
                     <h3>当前积分</h3>
-                    <p>捐赠和固定回收点在审核通过后累计，上门回收在完成后累计。</p>
+                    <p>积分会在物品完成交接或入仓核验后发放，申请可再利用物品时会先暂扣所需积分。</p>
                 </div>
                 <div class="stat-card">
                     <strong><?= e((string) count($myItems)) ?></strong>
@@ -1495,7 +1793,7 @@ elseif ($page === 'dashboard'):
             <?php if ($section === 'overview'): ?>
                 <?php if ($myItems === []): ?>
                     <div class="empty-state">
-                        <p>你还没有提交过电子产品。上传一条物品后，管理员审核通过即可进入流程；若选择上门回收，则完成回收后再获得积分。</p>
+                        <p>你还没有提交过电子产品。提交后系统会先审核并生成物品编号，再根据处理方式进入公示、投递或上门回收流程。</p>
                     </div>
                 <?php else: ?>
                     <div class="table-wrap">
@@ -1503,20 +1801,50 @@ elseif ($page === 'dashboard'):
                             <thead>
                             <tr>
                                 <th>物品</th>
+                                <th>物品编号</th>
                                 <th>处理方式</th>
+                                <th>完成奖励</th>
                                 <th>状态</th>
                                 <th>提交时间</th>
                                 <th>管理员备注</th>
+                                <th>操作</th>
                             </tr>
                             </thead>
                             <tbody>
                             <?php foreach (array_reverse($myItems) as $item): ?>
                                 <tr>
                                     <td data-label="物品"><a href="<?= e(app_url(['page' => 'item', 'id' => (int) $item['id']])) ?>"><?= e($item['title']) ?></a></td>
+                                    <td data-label="物品编号"><?= e((string) ($item['item_code'] ?? '待审核后生成')) ?></td>
                                     <td data-label="处理方式"><?= e(disposal_label((string) $item['disposal_type'])) ?></td>
-                                    <td data-label="状态"><span class="badge <?= e(item_badge_class((string) $item['status'])) ?>"><?= e(status_label((string) $item['status'])) ?></span></td>
+                                    <td data-label="完成奖励"><?= e(item_reward_points_label($item)) ?></td>
+                                    <td data-label="状态"><span class="badge <?= e(item_badge_class((string) $item['status'])) ?>"><?= e(item_status_label((string) $item['status'])) ?></span></td>
                                     <td data-label="提交时间"><?= e($item['created_at']) ?></td>
                                     <td data-label="管理员备注"><?= e($item['admin_note'] ?: '暂无') ?></td>
+                                    <td data-label="操作">
+                                        <?php if (($item['status'] ?? '') === 'dropoff_ready'): ?>
+                                            <form method="post" class="table-actions">
+                                                <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                                <input type="hidden" name="action" value="user_confirm_dropoff">
+                                                <input type="hidden" name="item_id" value="<?= e((string) $item['id']) ?>">
+                                                <button type="submit">确认已投递</button>
+                                            </form>
+                                        <?php elseif (($item['status'] ?? '') === 'pickup_scheduled' && empty($item['user_pickup_confirmed'])): ?>
+                                            <form method="post" class="table-actions">
+                                                <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                                <input type="hidden" name="action" value="user_confirm_pickup">
+                                                <input type="hidden" name="item_id" value="<?= e((string) $item['id']) ?>">
+                                                <button type="submit">确认已取走</button>
+                                            </form>
+                                        <?php elseif (($item['status'] ?? '') === 'dropoff_delivered'): ?>
+                                            <span class="muted">等待回收人员统一回收</span>
+                                        <?php elseif (($item['status'] ?? '') === 'pickup_scheduled' && !empty($item['user_pickup_confirmed'])): ?>
+                                            <span class="muted">已确认，等待回收人员确认</span>
+                                        <?php elseif (($item['status'] ?? '') === 'picked_up'): ?>
+                                            <span class="muted">等待管理员入仓核验</span>
+                                        <?php else: ?>
+                                            <span class="muted">暂无操作</span>
+                                        <?php endif; ?>
+                                    </td>
                                 </tr>
                             <?php endforeach; ?>
                             </tbody>
@@ -1534,6 +1862,7 @@ elseif ($page === 'dashboard'):
                             <thead>
                             <tr>
                                 <th>申请物品</th>
+                                <th>暂扣积分</th>
                                 <th>申请说明</th>
                                 <th>状态</th>
                                 <th>管理员回复</th>
@@ -1544,6 +1873,7 @@ elseif ($page === 'dashboard'):
                             <?php foreach ($myApplications as $application): ?>
                                 <tr>
                                     <td data-label="申请物品"><?= e($itemById[(int) $application['item_id']]['title'] ?? '未知物品') ?></td>
+                                    <td data-label="暂扣积分"><?= e((string) ((int) ($application['reserved_points'] ?? 0))) ?></td>
                                     <td data-label="申请说明"><?= e($application['purpose']) ?></td>
                                     <td data-label="状态"><span class="badge <?= e(application_badge_class((string) $application['status'])) ?>"><?= e(application_status_label((string) $application['status'])) ?></span></td>
                                     <td data-label="管理员回复"><?= e($application['admin_reply'] ?: '暂无') ?></td>
@@ -1645,13 +1975,14 @@ elseif ($page === 'dashboard'):
 elseif ($page === 'points'):
     $user = $currentUser;
     $activeRewards = array_values(array_filter($rewards, static fn(array $reward): bool => !empty($reward['active'])));
+    $rewardPointTiers = reward_points_tiers();
     ?>
     <section class="content-grid">
         <article class="panel">
             <div class="panel-header">
                 <div>
                     <h2 class="section-title">积分商城</h2>
-                    <p class="section-lead">捐赠和固定回收点在审核通过后奖励 5 积分，上门回收在完成后奖励 5 积分，积分可用于兑换环保主题小物品。</p>
+                    <p class="section-lead">积分可用于兑换环保主题小物品，也可用于在公示大厅申请可继续使用的电子废弃物；积分会在最终交接或入仓核验后发放。</p>
                 </div>
                 <?php if ($user !== null): ?>
                     <span class="badge">当前积分 <?= e((string) $user['points']) ?></span>
@@ -1697,13 +2028,38 @@ elseif ($page === 'points'):
             </div>
             <div class="cards-grid" style="grid-template-columns:1fr;">
                 <div class="feature-card">
-                    <h3>5 积分 / 条</h3>
-                    <p>捐赠 / 固定回收点审核通过后发放；上门回收在管理员确认完成后发放。</p>
+                    <h3>参考价分段换积分</h3>
+                    <p>管理员会在最终完成环节录入参考价，系统再按分段自动换算积分，并在完成核验后一次性发放。</p>
                 </div>
                 <div class="feature-card">
                     <h3>积分扣减规则</h3>
-                    <p>提交兑换申请时先暂扣积分，若管理员驳回则自动退回。</p>
+                    <p>提交积分商品兑换或公示大厅可再利用物品申请时会先暂扣积分，若管理员驳回则自动退回。</p>
                 </div>
+            </div>
+            <div class="table-wrap" style="margin-top:16px;">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>参考价区间</th>
+                        <th>对应积分</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($rewardPointTiers as $tier): ?>
+                        <tr>
+                            <td data-label="参考价区间">
+                                <?= e(rtrim(rtrim(number_format((float) $tier['min'], 2), '0'), '.')) ?> 元
+                                <?php if ($tier['max'] !== null): ?>
+                                    - <?= e(rtrim(rtrim(number_format((float) $tier['max'], 2), '0'), '.')) ?> 元
+                                <?php else: ?>
+                                    及以上
+                                <?php endif; ?>
+                            </td>
+                            <td data-label="对应积分"><?= e((string) $tier['points']) ?> 积分</td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
             </div>
         </article>
     </section>
@@ -1712,9 +2068,11 @@ elseif ($page === 'admin'):
     require_admin_user();
     $tab = (string) get_value('tab', 'overview');
     $pendingItems = array_values(array_filter($items, static fn(array $item): bool => ($item['status'] ?? '') === 'pending_review'));
-    $activeItems = array_values(array_filter($items, static fn(array $item): bool => in_array($item['status'] ?? '', ['published', 'dropoff_ready', 'matched'], true) && ($item['disposal_type'] ?? '') !== 'door_pickup'));
+    $activeItems = array_values(array_filter($items, static fn(array $item): bool => in_array($item['status'] ?? '', ['published', 'dropoff_ready', 'dropoff_delivered', 'matched'], true) && ($item['disposal_type'] ?? '') !== 'door_pickup'));
     $pendingDoorPickupItems = array_values(array_filter($items, static fn(array $item): bool => ($item['disposal_type'] ?? '') === 'door_pickup' && ($item['status'] ?? '') === 'pickup_scheduled'));
+    $pickedUpDoorPickupItems = array_values(array_filter($items, static fn(array $item): bool => ($item['disposal_type'] ?? '') === 'door_pickup' && ($item['status'] ?? '') === 'picked_up'));
     $doorPickupHistoryItems = array_values(array_filter($items, static fn(array $item): bool => ($item['disposal_type'] ?? '') === 'door_pickup' && ($item['status'] ?? '') === 'completed'));
+    $warehousePendingItems = array_values(array_filter($items, static fn(array $item): bool => in_array(($item['status'] ?? ''), ['dropoff_delivered', 'picked_up'], true)));
     $pendingApplications = array_values(array_filter($applications, static fn(array $application): bool => ($application['status'] ?? '') === 'pending'));
     $pendingRedemptions = array_values(array_filter($redemptions, static fn(array $redemption): bool => ($redemption['status'] ?? '') === 'pending'));
     $pointById = point_lookup();
@@ -1767,6 +2125,11 @@ elseif ($page === 'admin'):
                 <p>积分商城兑换申请待确认发放。</p>
             </article>
             <article class="stat-card">
+                <strong><?= e((string) count($warehousePendingItems)) ?></strong>
+                <h3>待入仓核验</h3>
+                <p>已完成投递或取走确认，等待集中分类仓库核验。</p>
+            </article>
+            <article class="stat-card">
                 <strong><?= e((string) count(active_pickup_points())) ?></strong>
                 <h3>启用中的回收点</h3>
                 <p>覆盖两个校区的回收场景。</p>
@@ -1796,7 +2159,7 @@ elseif ($page === 'admin'):
                                     <td data-label="物品"><?= e($item['title']) ?></td>
                                     <td data-label="提交人"><?= e($usersById[(int) $item['user_id']]['nickname'] ?? '未知用户') ?></td>
                                     <td data-label="方式"><?= e(disposal_label((string) $item['disposal_type'])) ?></td>
-                                    <td data-label="状态"><span class="badge <?= e(item_badge_class((string) $item['status'])) ?>"><?= e(status_label((string) $item['status'])) ?></span></td>
+                                    <td data-label="状态"><span class="badge <?= e(item_badge_class((string) $item['status'])) ?>"><?= e(item_status_label((string) $item['status'])) ?></span></td>
                                     <td data-label="时间"><?= e($item['created_at']) ?></td>
                                 </tr>
                             <?php endforeach; ?>
@@ -1861,6 +2224,9 @@ elseif ($page === 'admin'):
                                             <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
                                             <input type="hidden" name="action" value="admin_review_item">
                                             <input type="hidden" name="item_id" value="<?= e((string) $item['id']) ?>">
+                                            <?php if (($item['disposal_type'] ?? '') === 'donation'): ?>
+                                                <input name="exchange_points" type="number" min="1" value="<?= e((string) item_exchange_points($item)) ?>" placeholder="公示兑换所需积分">
+                                            <?php endif; ?>
                                             <textarea name="admin_note" placeholder="审核备注或驳回原因"></textarea>
                                             <div class="inline-actions">
                                                 <button type="submit" name="decision" value="approve">通过</button>
@@ -1888,6 +2254,7 @@ elseif ($page === 'admin'):
                         <tr>
                             <th>物品</th>
                             <th>提交人</th>
+                            <th>编号 / 积分</th>
                             <th>状态</th>
                             <th>管理员操作</th>
                         </tr>
@@ -1897,15 +2264,31 @@ elseif ($page === 'admin'):
                             <tr>
                                 <td data-label="物品"><?= e($item['title']) ?><br><span class="muted"><?= e(disposal_label((string) $item['disposal_type'])) ?></span></td>
                                 <td data-label="提交人"><?= e($usersById[(int) $item['user_id']]['nickname'] ?? '未知用户') ?></td>
-                                <td data-label="状态"><span class="badge <?= e(item_badge_class((string) $item['status'])) ?>"><?= e(status_label((string) $item['status'])) ?></span></td>
+                                <td data-label="编号 / 积分">
+                                    <span class="muted"><?= e((string) ($item['item_code'] ?? '待生成')) ?></span><br>
+                                    <span class="muted">
+                                        奖励 <?= e(item_reward_points_label($item)) ?>
+                                        <?php if (($item['disposal_type'] ?? '') === 'donation'): ?>
+                                            · 兑换 <?= e((string) item_exchange_points($item)) ?> 分
+                                        <?php endif; ?>
+                                    </span>
+                                </td>
+                                <td data-label="状态"><span class="badge <?= e(item_badge_class((string) $item['status'])) ?>"><?= e(item_status_label((string) $item['status'])) ?></span></td>
                                 <td data-label="管理员操作">
-                                    <form method="post" class="table-actions">
-                                        <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
-                                        <input type="hidden" name="action" value="admin_complete_item">
-                                        <input type="hidden" name="item_id" value="<?= e((string) $item['id']) ?>">
-                                        <textarea name="admin_note" placeholder="填写交接完成、已投递回收等备注"></textarea>
-                                        <button type="submit">标记完成</button>
-                                    </form>
+                                    <?php if (($item['status'] ?? '') === 'dropoff_delivered' || ($item['status'] ?? '') === 'matched'): ?>
+                                        <form method="post" class="table-actions">
+                                            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                            <input type="hidden" name="action" value="admin_complete_item">
+                                            <input type="hidden" name="item_id" value="<?= e((string) $item['id']) ?>">
+                                            <input name="reference_price" type="number" min="0.01" step="0.01" placeholder="<?= ($item['status'] ?? '') === 'matched' ? '最终流转参考价（元）' : '最终回收参考价（元）' ?>" required>
+                                            <textarea name="admin_note" placeholder="<?= ($item['status'] ?? '') === 'matched' ? '填写交接完成备注' : '填写入仓核验备注' ?>"></textarea>
+                                            <button type="submit"><?= ($item['status'] ?? '') === 'matched' ? '确认交接完成' : '确认入仓并发积分' ?></button>
+                                        </form>
+                                    <?php elseif (($item['status'] ?? '') === 'dropoff_ready'): ?>
+                                        <span class="muted">等待用户按编号完成投递</span>
+                                    <?php else: ?>
+                                        <span class="muted">流程进行中，暂不需要后台操作</span>
+                                    <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -1926,6 +2309,7 @@ elseif ($page === 'admin'):
                         <tr>
                             <th>物品</th>
                             <th>提交人</th>
+                            <th>物品编号</th>
                             <th>宿舍信息</th>
                             <th>预约时段</th>
                             <th>处理</th>
@@ -1943,15 +2327,64 @@ elseif ($page === 'admin'):
                                     <?= e($usersById[(int) $item['user_id']]['nickname'] ?? '未知用户') ?><br>
                                     <span class="muted"><?= e(mask_phone((string) ($usersById[(int) $item['user_id']]['phone'] ?? ''))) ?></span>
                                 </td>
+                                <td data-label="物品编号">
+                                    <?= e((string) ($item['item_code'] ?? '待生成')) ?><br>
+                                    <span class="muted">用户<?= !empty($item['user_pickup_confirmed']) ? '已' : '未' ?>确认 · 回收人员<?= !empty($item['admin_pickup_confirmed']) ? '已' : '未' ?>确认</span>
+                                </td>
                                 <td data-label="宿舍信息"><?= e(door_pickup_address_display($item) ?: '未填写') ?></td>
                                 <td data-label="预约时段"><?= e((string) ($item['door_pickup_slot'] ?? '未填写')) ?></td>
+                                <td data-label="处理">
+                                    <?php if (empty($item['admin_pickup_confirmed'])): ?>
+                                        <form method="post" class="table-actions">
+                                            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                            <input type="hidden" name="action" value="admin_confirm_pickup">
+                                            <input type="hidden" name="item_id" value="<?= e((string) $item['id']) ?>">
+                                            <textarea name="admin_note" placeholder="填写已取走时间、交接情况等备注"></textarea>
+                                            <button type="submit">确认已取走</button>
+                                        </form>
+                                    <?php elseif (!empty($item['user_pickup_confirmed'])): ?>
+                                        <span class="muted">双方已确认，等待系统转入入仓核验</span>
+                                    <?php else: ?>
+                                        <span class="muted">已记录回收人员确认，等待用户确认</span>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
+        </section>
+
+        <section class="table-card" style="margin-top:18px;">
+            <h2>待入仓核验的上门回收记录</h2>
+            <?php if ($pickedUpDoorPickupItems === []): ?>
+                <div class="empty-state"><p>当前没有待入仓核验的上门回收记录。</p></div>
+            <?php else: ?>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                        <tr>
+                            <th>物品</th>
+                            <th>编号</th>
+                            <th>宿舍信息</th>
+                            <th>处理</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach (array_reverse($pickedUpDoorPickupItems) as $item): ?>
+                            <tr>
+                                <td data-label="物品"><?= e($item['title']) ?><br><span class="muted"><?= e($usersById[(int) $item['user_id']]['nickname'] ?? '未知用户') ?></span></td>
+                                <td data-label="编号"><?= e((string) ($item['item_code'] ?? '')) ?><br><span class="muted">奖励 <?= e(item_reward_points_label($item)) ?></span></td>
+                                <td data-label="宿舍信息"><?= e(door_pickup_address_display($item) ?: '未填写') ?><br><span class="muted"><?= e((string) ($item['door_pickup_slot'] ?? '')) ?></span></td>
                                 <td data-label="处理">
                                     <form method="post" class="table-actions">
                                         <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
                                         <input type="hidden" name="action" value="admin_complete_item">
                                         <input type="hidden" name="item_id" value="<?= e((string) $item['id']) ?>">
-                                        <textarea name="admin_note" placeholder="填写已上门回收时间、交接情况等备注"></textarea>
-                                        <button type="submit">标记已上门回收</button>
+                                        <input name="reference_price" type="number" min="0.01" step="0.01" placeholder="最终回收参考价（元）" required>
+                                        <textarea name="admin_note" placeholder="填写入仓核验结果与分类备注"></textarea>
+                                        <button type="submit">确认入仓并发积分</button>
                                     </form>
                                 </td>
                             </tr>
@@ -2005,6 +2438,7 @@ elseif ($page === 'admin'):
                         <tr>
                             <th>申请物品</th>
                             <th>申请人</th>
+                            <th>暂扣积分</th>
                             <th>用途说明</th>
                             <th>处理</th>
                         </tr>
@@ -2015,6 +2449,7 @@ elseif ($page === 'admin'):
                             <tr>
                                 <td data-label="申请物品"><?= e($item['title'] ?? '未知物品') ?><br><span class="muted"><?= e($item ? disposal_label((string) $item['disposal_type']) : '') ?></span></td>
                                 <td data-label="申请人"><?= e($usersById[(int) $application['applicant_id']]['nickname'] ?? '未知用户') ?><br><span class="muted"><?= e(mask_phone((string) ($usersById[(int) $application['applicant_id']]['phone'] ?? ''))) ?></span></td>
+                                <td data-label="暂扣积分"><?= e((string) ((int) ($application['reserved_points'] ?? 0))) ?></td>
                                 <td data-label="用途说明"><?= e($application['purpose']) ?></td>
                                 <td data-label="处理">
                                     <form method="post" class="table-actions">

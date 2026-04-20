@@ -601,6 +601,140 @@ function upload_image(array $file): string
     return 'uploads/' . $filename;
 }
 
+function item_code_prefix(string $type): string
+{
+    return match ($type) {
+        'donation' => 'DON',
+        'door_pickup' => 'PUP',
+        default => 'REC',
+    };
+}
+
+function generate_item_code(array $item): string
+{
+    $dateSource = (string) ($item['approved_at'] ?? $item['updated_at'] ?? $item['created_at'] ?? now());
+    $date = preg_replace('/\D+/', '', substr($dateSource, 0, 10)) ?: date('Ymd');
+
+    return item_code_prefix((string) ($item['disposal_type'] ?? 'recycle'))
+        . '-'
+        . substr($date, 0, 8)
+        . '-'
+        . str_pad((string) ((int) ($item['id'] ?? 0)), 6, '0', STR_PAD_LEFT);
+}
+
+function reward_points_tiers(): array
+{
+    return [
+        ['min' => 0, 'max' => 19.99, 'points' => 3],
+        ['min' => 20, 'max' => 49.99, 'points' => 6],
+        ['min' => 50, 'max' => 99.99, 'points' => 10],
+        ['min' => 100, 'max' => 199.99, 'points' => 16],
+        ['min' => 200, 'max' => 399.99, 'points' => 24],
+        ['min' => 400, 'max' => 799.99, 'points' => 36],
+        ['min' => 800, 'max' => 1499.99, 'points' => 50],
+        ['min' => 1500, 'max' => null, 'points' => 68],
+    ];
+}
+
+function reward_points_from_reference_price(float $price): int
+{
+    $normalized = max(0, $price);
+    foreach (reward_points_tiers() as $tier) {
+        $max = $tier['max'];
+        if ($normalized >= (float) $tier['min'] && ($max === null || $normalized <= (float) $max)) {
+            return (int) $tier['points'];
+        }
+    }
+
+    return 0;
+}
+
+function item_reward_points_determined(array $item): bool
+{
+    if ((float) ($item['reference_price'] ?? 0) > 0) {
+        return true;
+    }
+
+    return ($item['status'] ?? '') === 'completed' && (int) ($item['reward_points'] ?? 0) > 0;
+}
+
+function item_reward_points(array $item): int
+{
+    $referencePrice = (float) ($item['reference_price'] ?? 0);
+    if ($referencePrice > 0) {
+        return reward_points_from_reference_price($referencePrice);
+    }
+
+    $stored = (int) ($item['reward_points'] ?? 0);
+    if (($item['status'] ?? '') === 'completed' && $stored > 0) {
+        return $stored;
+    }
+
+    return 0;
+}
+
+function item_reward_points_label(array $item): string
+{
+    if (item_reward_points_determined($item)) {
+        return (string) item_reward_points($item) . ' 积分';
+    }
+
+    return '待核验后确定';
+}
+
+function calculate_item_exchange_points(array $item): int
+{
+    if (($item['disposal_type'] ?? '') !== 'donation') {
+        return 0;
+    }
+
+    $categoryBase = match ((string) ($item['category'] ?? '')) {
+        '手机与平板' => 35,
+        '笔记本与电脑配件' => 40,
+        '耳机与音响' => 22,
+        '充电器与数据线' => 12,
+        '智能穿戴设备' => 26,
+        '小型电子元件' => 16,
+        default => 20,
+    };
+
+    $conditionBonus = match ((string) ($item['condition'] ?? '')) {
+        'almost_new' => 8,
+        'good' => 5,
+        'fair' => 2,
+        default => 0,
+    };
+
+    return max(1, $categoryBase + $conditionBonus);
+}
+
+function item_exchange_points(array $item): int
+{
+    $stored = (int) ($item['exchange_points'] ?? 0);
+    if ($stored > 0) {
+        return $stored;
+    }
+
+    return calculate_item_exchange_points($item);
+}
+
+function item_status_label(string $status): string
+{
+    return match ($status) {
+        'pending_review' => '待审核',
+        'published' => '公示中',
+        'dropoff_ready' => '待投递',
+        'dropoff_delivered' => '已投递待回收',
+        'pickup_scheduled' => '待上门回收',
+        'picked_up' => '已取走待入仓',
+        'matched' => '已匹配',
+        'completed' => '已完成',
+        'rejected' => '已驳回',
+        'cancelled' => '已取消',
+        default => '处理中',
+    };
+}
+
 function status_label(string $status): string
 {
     return match ($status) {

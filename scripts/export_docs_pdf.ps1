@@ -25,6 +25,7 @@ function Convert-InlineMarkdownToHtml {
     param([string] $text)
 
     $encoded = [System.Net.WebUtility]::HtmlEncode($text)
+    $encoded = [regex]::Replace($encoded, '!\[([^\]]*)\]\(([^)]+)\)', '<img src="$2" alt="$1">')
     $encoded = [regex]::Replace($encoded, '`([^`]+)`', '<code>$1</code>')
     $encoded = [regex]::Replace($encoded, '\[([^\]]+)\]\(([^)]+)\)', '<a href="$2">$1</a>')
     return $encoded
@@ -92,6 +93,15 @@ function Convert-MarkdownToHtmlBody {
             $level = $matches[1].Length
             $content = Convert-InlineMarkdownToHtml $matches[2]
             [void]$builder.AppendLine("<h$level>$content</h$level>")
+            continue
+        }
+
+        if ($line -match '^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$') {
+            Flush-Paragraph $paragraph $builder
+            Close-Lists ([ref]$inUl) ([ref]$inOl) $builder
+            $alt = [System.Net.WebUtility]::HtmlEncode($matches[1])
+            $src = [System.Net.WebUtility]::HtmlEncode($matches[2])
+            [void]$builder.AppendLine("<figure class=""doc-figure""><img src=""$src"" alt=""$alt""><figcaption>$alt</figcaption></figure>")
             continue
         }
 
@@ -225,6 +235,22 @@ function New-HtmlDocument {
         a {
             color: #1858d3;
             text-decoration: none;
+        }
+        .doc-figure {
+            margin: 14px auto 18px;
+            text-align: center;
+            page-break-inside: avoid;
+        }
+        .doc-figure img {
+            display: inline-block;
+            max-width: 240px;
+            width: 100%;
+            height: auto;
+        }
+        .doc-figure figcaption {
+            margin-top: 8px;
+            font-size: 12px;
+            color: #475569;
         }
     </style>
 </head>

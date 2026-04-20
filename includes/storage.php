@@ -221,6 +221,7 @@ function initialize_storage(): void
     seed_rewards();
     seed_announcements();
     migrate_item_records();
+    migrate_application_records();
 }
 
 function migrate_item_records(): void
@@ -243,8 +244,20 @@ function migrate_item_records(): void
             'donation_reason' => '',
             'expected_price' => 0,
             'admin_note' => '',
+            'item_code' => '',
+            'approved_at' => '',
+            'completed_at' => '',
+            'reference_price' => 0,
+            'exchange_points' => 0,
+            'reward_points' => 0,
             'points_awarded' => false,
             'matched_application_id' => 0,
+            'user_dropoff_confirmed' => false,
+            'user_dropoff_confirmed_at' => '',
+            'user_pickup_confirmed' => false,
+            'user_pickup_confirmed_at' => '',
+            'admin_pickup_confirmed' => false,
+            'admin_pickup_confirmed_at' => '',
             'door_pickup_campus' => '',
             'door_pickup_building' => '',
             'door_pickup_floor' => '',
@@ -258,11 +271,62 @@ function migrate_item_records(): void
                 $changed = true;
             }
         }
+
+        if (($item['disposal_type'] ?? '') === 'donation' && (int) ($item['exchange_points'] ?? 0) <= 0) {
+            $item['exchange_points'] = calculate_item_exchange_points($item);
+            $changed = true;
+        }
+
+        if (($item['disposal_type'] ?? '') !== 'donation' && (int) ($item['exchange_points'] ?? 0) !== 0) {
+            $item['exchange_points'] = 0;
+            $changed = true;
+        }
+
+        if (((string) ($item['item_code'] ?? '')) === '' && in_array((string) ($item['status'] ?? ''), ['published', 'dropoff_ready', 'dropoff_delivered', 'pickup_scheduled', 'picked_up', 'matched', 'completed'], true)) {
+            $item['item_code'] = generate_item_code($item);
+            $changed = true;
+        }
+
+        if ((float) ($item['reference_price'] ?? 0) > 0) {
+            $calculatedRewardPoints = reward_points_from_reference_price((float) $item['reference_price']);
+            if ((int) ($item['reward_points'] ?? 0) !== $calculatedRewardPoints) {
+                $item['reward_points'] = $calculatedRewardPoints;
+                $changed = true;
+            }
+        }
     }
     unset($item);
 
     if ($changed) {
         save_dataset('items', $items);
+    }
+}
+
+function migrate_application_records(): void
+{
+    $applications = load_dataset('applications');
+    if ($applications === []) {
+        return;
+    }
+
+    $changed = false;
+    foreach ($applications as &$application) {
+        $defaults = [
+            'reserved_points' => 0,
+            'points_refunded' => false,
+        ];
+
+        foreach ($defaults as $field => $defaultValue) {
+            if (!array_key_exists($field, $application)) {
+                $application[$field] = $defaultValue;
+                $changed = true;
+            }
+        }
+    }
+    unset($application);
+
+    if ($changed) {
+        save_dataset('applications', $applications);
     }
 }
 
