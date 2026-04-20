@@ -773,7 +773,7 @@ function reward_status_label(string $status): string
 function disposal_label(string $type): string
 {
     return match ($type) {
-        'donation' => '捐赠给校内有需要的用户',
+        'donation' => '历史捐赠记录（功能已停用）',
         'recycle' => '投放固定回收点',
         'door_pickup' => '上门回收',
         default => '未设置',

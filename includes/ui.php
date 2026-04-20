@@ -38,11 +38,10 @@ function render_header(string $title, ?array $user, array $flashes = []): void
     <header class="site-header">
         <div class="brand-block">
             <a class="brand-mark" href="<?= e(app_url()) ?>">绿循校园</a>
-            <p class="brand-subtitle">校园电子废物捐赠与定点回收平台</p>
+            <p class="brand-subtitle">校园电子废物定点回收与上门回收平台</p>
         </div>
         <nav class="main-nav" aria-label="主导航">
             <a href="<?= e(app_url()) ?>">首页</a>
-            <a href="<?= e(app_url(['page' => 'listings'])) ?>">公示大厅</a>
             <a href="<?= e(app_url(['page' => 'submit'])) ?>">提交物品</a>
             <a href="<?= e(app_url(['page' => 'points'])) ?>">积分兑换</a>
             <?php if ($user !== null): ?>

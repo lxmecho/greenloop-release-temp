@@ -46,19 +46,19 @@ $announcements = read_json_array($dataDir . DIRECTORY_SEPARATOR . 'announcements
 
 $adminLoginPage = find_admin_login_page($root . DIRECTORY_SEPARATOR . 'includes' . DIRECTORY_SEPARATOR . 'bootstrap.php');
 
-$published = 0;
 $pendingReview = 0;
 $dropoffReady = 0;
+$pickupScheduled = 0;
 $completed = 0;
 
 foreach ($items as $item) {
     $status = (string) ($item['status'] ?? '');
-    if ($status === 'published') {
-        $published++;
-    } elseif ($status === 'pending_review') {
+    if ($status === 'pending_review') {
         $pendingReview++;
     } elseif ($status === 'dropoff_ready') {
         $dropoffReady++;
+    } elseif ($status === 'pickup_scheduled') {
+        $pickupScheduled++;
     } elseif ($status === 'completed') {
         $completed++;
     }
@@ -83,16 +83,15 @@ $markdown[] = '- Users: ' . count($users);
 $markdown[] = '- Items: ' . count($items);
 $markdown[] = '- Applications: ' . count($applications);
 $markdown[] = '- Redemptions: ' . count($redemptions);
-$markdown[] = '- Published donations: ' . $published;
 $markdown[] = '- Pending review: ' . $pendingReview;
 $markdown[] = '- Dropoff ready: ' . $dropoffReady;
+$markdown[] = '- Pickup scheduled: ' . $pickupScheduled;
 $markdown[] = '- Completed: ' . $completed;
 $markdown[] = '- Active announcement: ' . ($activeAnnouncement !== '' ? $activeAnnouncement : '(none)');
 $markdown[] = '';
 $markdown[] = '## Runtime URLs';
 $markdown[] = '';
 $markdown[] = '- Home: `/index.php`';
-$markdown[] = '- Public listings: `/index.php?page=listings`';
 $markdown[] = '- Submit item: `/index.php?page=submit`';
 $markdown[] = '- Points: `/index.php?page=points`';
 $markdown[] = '- User auth: `/index.php?page=login`';
@@ -101,16 +100,16 @@ $markdown[] = '- Admin console: `/index.php?page=admin` (after admin login)';
 $markdown[] = '';
 $markdown[] = '## Current Product Rules';
 $markdown[] = '';
-$markdown[] = '- Disposal types: donation + fixed pickup point only.';
+$markdown[] = '- Disposal types: fixed pickup point + door pickup.';
 $markdown[] = '- Account key: phone number.';
-$markdown[] = '- Points: +5 per approved submission.';
+$markdown[] = '- Points: determined by final reference price.';
 $markdown[] = '- Admin entry is hidden behind `ADMIN_LOGIN_PAGE`.';
 $markdown[] = '';
 $markdown[] = '## Quick Continuation Checklist';
 $markdown[] = '';
 $markdown[] = '- Verify homepage announcement content is up to date.';
 $markdown[] = '- Verify register/login flow and one-phone-input UX.';
-$markdown[] = '- Verify listing card image uses full-display mode (`object-fit: contain`).';
+$markdown[] = '- Verify submit page only exposes recycle + door pickup options.';
 $markdown[] = '- Verify admin can edit announcements and review flows.';
 $markdown[] = '';
 $markdown[] = '## Note about compact errors';
@@ -125,4 +124,3 @@ if ($result === false) {
 }
 
 fwrite(STDOUT, "Generated: $outputPath" . PHP_EOL);
-
